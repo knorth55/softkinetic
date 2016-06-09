@@ -5,9 +5,9 @@ The arguments given are the device indices of the cameras determined by the Dept
 -->
 <launch>
   <node name="softkinetic_camera" pkg="softkinetic_camera" type="softkinetic_bringup_node" args="0" output="screen" >
-    <param name="camera_link" type="string" value="/softkinetic_camera_link" />
-    <param name="rgb_optical_frame" type="string" value="/softkinetic_camera_rgb_optical_frame" />
-    <param name="depth_optical_frame" type="string" value="/softkinetic_camera_depth_optical_frame" />
+    <param name="camera_link" type="string" value="softkinetic_camera_link" />
+    <param name="rgb_optical_frame" type="string" value="softkinetic_camera_rgb_optical_frame" />
+    <param name="depth_optical_frame" type="string" value="softkinetic_camera_depth_optical_frame" />
     <param name="rgb_calibration_file" type="string" value="$(find softkinetic_camera)/resources/senz3d.yaml" />
     <param name="confidence_threshold" type="int" value="200" />
     <param name="use_radius_outlier_filter" type="bool" value="false" />
@@ -39,4 +39,40 @@ The arguments given are the device indices of the cameras determined by the Dept
   <node pkg="rviz" type="rviz" name="softkinect_rviz" respawn="false"  required="true"
 	args="-d $(find softkinetic_camera)/launch/softkinetic.rviz"  />
 
+  <!-- generate depth registeared cloud which has rgb_optical_frame as frame_id -->
+  <group ns="softkinetic_camera" >
+    <node pkg="nodelet" type="nodelet" name="softkinetic_manager" args="manager" output="screen"/>
+    <!-- register depth image to rgb_optical_frame http://wiki.ros.org/depth_image_proc -->
+    <!-- input: depth/image_raw  output: depth_registered/image_rect -->
+    <node pkg="nodelet" type="nodelet" name="depth_image_proc_register" args="load depth_image_proc/register softkinetic_manager" output="screen">
+      <remap from="depth/image_rect" to="depth/image_raw" />
+    </node>
+    <!-- combine register depth image and rgb image in rgb_optical_frame http://wiki.ros.org/depth_image_proc -->
+    <!-- input: depth_registered/image_raw, rgb_image_color  output: depth_registered/points -->
+    <node pkg="nodelet" type="nodelet" name="depth_image_proc_point_cloud_xyzrgb" args="load depth_image_proc/point_cloud_xyzrgb softkinetic_manager" output="screen">
+      <remap from="rgb/image_rect_color" to="rgb/image_color" />
+    </node>
+
+    <!-- downsample point cloud data for outlier filtering http://wiki.ros.org/pcl_ros/Tutorials/VoxelGrid%20filtering -->
+    <!-- input: depth_registered/points, depth_registered_downsample/points -->
+    <node pkg="nodelet" type="nodelet" name="voxel_grid_downsample" args="load pcl/VoxelGrid softkinetic_manager" output="screen">
+      <remap from="~input" to="depth_registered/points" />
+      <remap from="~output" to="depth_registered_downsample/points" />
+      <rosparam>
+        leaf_size: 0.0025
+      </rosparam>
+    </node>
+
+    <!-- statistical outlier removal http://wiki.ros.org/pcl_ros/Tutorials/filters -->
+    <!-- input: depth_registered_downsample/points, depth_registered_downsample/points_filtered -->
+    <node pkg="nodelet" type="nodelet" name="statistical_outlier_removal" args="load pcl/StatisticalOutlierRemoval softkinetic_manager" output="screen">
+      <remap from="~input" to="depth_registered_downsample/points" />
+      <remap from="~output" to="depth_registered_downsample/points_filtered" />
+      <rosparam>
+        mean_k: 50
+        stddev: 1.0
+        negative: false
+      </rosparam>
+    </node>
+  </group>
 </launch>
