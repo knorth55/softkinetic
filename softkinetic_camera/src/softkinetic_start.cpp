@@ -109,13 +109,11 @@ uint32_t g_dFrames = 0;
 bool g_bDeviceFound = false;
 
 ros::Publisher pub_cloud;
-ros::Publisher pub_cloud_registered;
 ros::Publisher pub_rgb_info;
 ros::Publisher pub_depth_info;
 image_transport::Publisher pub_rgb;
 image_transport::Publisher pub_mono;
 image_transport::Publisher pub_depth;
-ros::Publisher pub_depth_registered;
 
 sensor_msgs::CameraInfo rgb_info;
 sensor_msgs::CameraInfo depth_info;
@@ -123,9 +121,7 @@ sensor_msgs::CameraInfo depth_info;
 sensor_msgs::Image img_rgb;
 sensor_msgs::Image img_mono;
 sensor_msgs::Image img_depth;
-sensor_msgs::Image img_depth_registered;
 sensor_msgs::PointCloud2 cloud;
-sensor_msgs::PointCloud2 cloud_registered;
 
 cv::Mat cv_img_rgb; // Open CV image containers
 cv::Mat cv_img_yuy2;
@@ -274,8 +270,17 @@ void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
   std::memcpy(img_rgb.data.data(),  cv_img_rgb.ptr(),  img_rgb.data.size());
   std::memcpy(img_mono.data.data(), cv_img_mono.ptr(), img_mono.data.size());
 
+  // the time of capture of the sample, expressed in us
+  // http://www.softkinetic.com/support/Forum/aft/1876
+  // it does appear to be the CLOCK_MONOTONIC time (system up time).
+  struct timespec uptime;
+  clock_gettime(CLOCK_MONOTONIC, &uptime);
+  ros::Time now = ros::Time::now();
+  ros::Time upm = ros::Time(uptime.tv_sec, uptime.tv_nsec);
+  ros::Time timeOfCapture((double)data.timeOfCapture/1000000.0 + (now - upm).toSec() );
+
   // Ensure that all the images and camera info are timestamped and have the proper frame id
-  img_rgb.header.stamp = ros::Time::now();
+  img_rgb.header.stamp = timeOfCapture;
   img_mono.header      = img_rgb.header;
   rgb_info.header      = img_rgb.header;
 
@@ -453,18 +458,6 @@ void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
       setupCameraInfo(data.stereoCameraParameters.depthIntrinsics, depth_info);
     }
   }
-  int32_t min_w_registered = 30;
-  int32_t max_w_registered = 270;
-  int32_t min_h_registered = 35;
-  int32_t max_h_registered = 215;
-  if (img_depth_registered.data.size() == 0)
-  {
-    img_depth_registered.width = max_w_registered - min_w_registered;
-    img_depth_registered.height = max_h_registered - min_h_registered;
-    img_depth_registered.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-    img_depth_registered.is_bigendian = 0;
-    img_depth_registered.step = sizeof(float) * img_depth_registered.width;
-  }
 
   int32_t w = img_depth.width;
   int32_t h = img_depth.height;
@@ -481,11 +474,6 @@ void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
   // Dump depth map on image message, though we must do some post-processing for saturated pixels
   std::memcpy(img_depth.data.data(), data.depthMapFloatingPoint, img_depth.data.size());
 
-  // FOR DEBUG
-  // int32_t min_w = std::numeric_limits<int32_t>::max();
-  // int32_t max_w = 0;
-  // int32_t min_h = std::numeric_limits<int32_t>::max();
-  // int32_t max_h = 0;
   for (int count = 0; count < w * h; count++)
   {
     // Saturated pixels on depthMapFloatingPoint have -1 value, but on openni are NaN
@@ -498,9 +486,11 @@ void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
       // we keep them in the pointcloud so the downsampling filter can be applied
       continue;
     }
-    // FOR DEBUG
-    // int32_t w_ = (count % w);
-    // int32_t h_ = count / w;
+
+    // Convert softkinetic vertices into a kinect-like coordinates pointcloud
+    current_cloud->points[count].x =   data.verticesFloatingPoint[count].x;
+    current_cloud->points[count].y = - data.verticesFloatingPoint[count].y;
+    current_cloud->points[count].z =   data.verticesFloatingPoint[count].z;
 
     // Get mapping between depth map and color map, assuming we have a RGB image
     if (img_rgb.data.size() == 0)
@@ -518,98 +508,9 @@ void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
       current_cloud->points[count].b = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[0];
       current_cloud->points[count].g = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[1];
       current_cloud->points[count].r = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[2];
-      // FOR DEBUG
-      // if (w_ > max_w)
-      // {
-      //   max_w = w_;
-      // }
-      // if (w_ < min_w)
-      // {
-      //   min_w = w_;
-      // }
-      // if (h_ > max_h)
-      // {
-      //   max_h = h_;
-      // }
-      // if (h_ < min_h)
-      // {
-      //   min_h = h_;
-      // }
-    }
-    else
-    {
-      continue;
-    }
-    // Convert softkinetic vertices into a kinect-like coordinates pointcloud
-    current_cloud->points[count].x =   data.verticesFloatingPoint[count].x + 0.025;
-    current_cloud->points[count].y = - data.verticesFloatingPoint[count].y;
-    current_cloud->points[count].z =   data.verticesFloatingPoint[count].z;
-  }
-
-  //FOR DEBUG
-  // ROS_ERROR_STREAM("min_w: " << min_w);
-  // ROS_ERROR_STREAM("max_w: " << max_w);
-  // ROS_ERROR_STREAM("min_h: " << min_h);
-  // ROS_ERROR_STREAM("max_h: " << max_h);
-
-  std::vector<uint8_t> depth_registered;
-  int32_t w_ = img_depth_registered.width;
-  int32_t h_ = img_depth_registered.height;
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr current_cloud_registered(new pcl::PointCloud<pcl::PointXYZRGB>());
-  current_cloud_registered->header.frame_id = cloud_registered.header.frame_id;
-  current_cloud_registered->width = img_depth_registered.width;
-  current_cloud_registered->height = img_depth_registered.height;
-  current_cloud_registered->is_dense = true;
-  current_cloud_registered->points.resize(img_depth_registered.width * img_depth_registered.height);
-
-  int count_registered = 0;
-  for (int count = 0; count < w * h; count++)
-  {
-    int32_t w_registered = (count % w);
-    int32_t h_registered = count / w;
-    if (w_registered >= min_w_registered && w_registered < max_w_registered && h_registered >= min_h_registered && h_registered < max_h_registered)
-    {
-      UV uv = data.uvMap[count];
-      if (uv.u != -FLT_MAX && uv.v != -FLT_MAX)
-      {
-        if (data.depthMapFloatingPoint[count] < 0.0)
-        {
-          float depth_point = std::numeric_limits<float>::quiet_NaN();
-          uint8_t *depth_point_array = reinterpret_cast<uint8_t*>(&depth_point);
-          std::vector<uint8_t> depth_point_vec (depth_point_array, depth_point_array + 4);
-          depth_registered.insert(depth_registered.end(), depth_point_vec.begin(), depth_point_vec.end());
-          // We don't process these pixels as they correspond to all-zero 3D points; but
-          // we keep them in the pointcloud so the downsampling filter can be applied
-        }
-        else
-        {
-          float depth_point = data.depthMapFloatingPoint[count];
-          uint8_t *depth_point_array = reinterpret_cast<uint8_t *>(&depth_point);
-          std::vector<uint8_t> depth_point_vec (depth_point_array, depth_point_array + 4);
-          depth_registered.insert(depth_registered.end(), depth_point_vec.begin(), depth_point_vec.end());
-        }
-        // Convert softkinetic vertices into a kinect-like coordinates pointcloud
-        int x_pos = (int)round(uv.u*img_rgb.width);
-        int y_pos = (int)round(uv.v*img_rgb.height);
-        current_cloud_registered->points[count_registered].b = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[0];
-        current_cloud_registered->points[count_registered].g = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[1];
-        current_cloud_registered->points[count_registered].r = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[2];
-      }
-      else
-      {
-        float depth_point = std::numeric_limits<float>::quiet_NaN();
-        uint8_t *depth_point_array = reinterpret_cast<uint8_t*>(&depth_point);
-        std::vector<uint8_t> depth_point_vec (depth_point_array, depth_point_array + 4);
-        depth_registered.insert(depth_registered.end(), depth_point_vec.begin(), depth_point_vec.end());
-      }
-      current_cloud_registered->points[count_registered].x =   data.verticesFloatingPoint[count].x + 0.025;
-      current_cloud_registered->points[count_registered].y = - data.verticesFloatingPoint[count].y;
-      current_cloud_registered->points[count_registered].z =   data.verticesFloatingPoint[count].z;
-      count_registered++;
     }
   }
-  img_depth_registered.data.clear();
-  img_depth_registered.data = depth_registered;
+
   // Check for usage of voxel grid filtering to downsample point cloud
   // XXX This must be the first filter to be called, as it requires the "squared" point cloud
   // we create (with proper values for width and height) that any other filter would destroy
@@ -643,18 +544,21 @@ void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
 
   // Convert current_cloud to PointCloud2 and publish
   pcl::toROSMsg(*current_cloud, cloud);
-  pcl::toROSMsg(*current_cloud_registered, cloud_registered);
 
-  img_depth.header.stamp = ros::Time::now();
-  img_depth_registered.header.stamp = ros::Time::now();
-  cloud.header.stamp = ros::Time::now();
-  cloud_registered.header.stamp = ros::Time::now();
+  // the time of capture of the sample, expressed in us
+  // it does appear to be the CLOCK_MONOTONIC time (system up time).
+  struct timespec uptime;
+  clock_gettime(CLOCK_MONOTONIC, &uptime);
+  ros::Time now = ros::Time::now();
+  ros::Time upm = ros::Time(uptime.tv_sec, uptime.tv_nsec);
+  ros::Time timeOfCapture((double)data.timeOfCapture/1000000.0 + (now - upm).toSec() );
+
+  img_depth.header.stamp = timeOfCapture;
+  cloud.header.stamp = timeOfCapture;
   depth_info.header      = img_depth.header;
 
   pub_cloud.publish(cloud);
-  pub_cloud_registered.publish(cloud_registered);
   pub_depth.publish(img_depth);
-  pub_depth_registered.publish(img_depth_registered);
   pub_depth_info.publish(depth_info);
 }
 
@@ -953,20 +857,10 @@ int main(int argc, char* argv[])
   // Override the default ROS SIGINT handler to call g_context.quit() and avoid escalating to SIGTERM
   signal(SIGINT, sigintHandler);
 
-  // Get frame id from parameter server
-  if (!nh.hasParam("camera_link"))
-  {
-    ROS_ERROR_STREAM("For " << ros::this_node::getName() << ", parameter 'camera_link' is missing.");
-    ros_node_shutdown = true;
-  }
-
-
   // Fill in the color and depth images message header frame id
   std::string optical_frame;
   if (nh.getParam("rgb_optical_frame", optical_frame))
   {
-    cloud.header.frame_id = optical_frame.c_str();
-    cloud_registered.header.frame_id = optical_frame.c_str();
     img_rgb.header.frame_id = optical_frame.c_str();
     img_mono.header.frame_id = optical_frame.c_str();
   }
@@ -979,11 +873,12 @@ int main(int argc, char* argv[])
   if (nh.getParam("depth_optical_frame", optical_frame))
   {
     img_depth.header.frame_id = optical_frame.c_str();
-    img_depth_registered.header.frame_id = optical_frame.c_str();
+    cloud.header.frame_id = optical_frame.c_str();
   }
   else
   {
     img_depth.header.frame_id = "/softkinetic_depth_optical_frame";
+    cloud.header.frame_id = "/softkinetic_depth_optical_frame";
   }
 
   // Get confidence threshold from parameter server
@@ -1100,11 +995,9 @@ int main(int argc, char* argv[])
 
   // Initialize publishers
   pub_cloud = nh.advertise<sensor_msgs::PointCloud2>("depth/points", 1);
-  pub_cloud_registered = nh.advertise<sensor_msgs::PointCloud2>("depth_registered/points", 1);
   pub_rgb = it.advertise("rgb/image_color", 1);
   pub_mono = it.advertise("rgb/image_mono", 1);
   pub_depth = it.advertise("depth/image_raw", 1);
-  pub_depth_registered = nh.advertise<sensor_msgs::Image>("depth_registered/image_raw", 1);
   pub_depth_info = nh.advertise<sensor_msgs::CameraInfo>("depth/camera_info", 1);
   pub_rgb_info = nh.advertise<sensor_msgs::CameraInfo>("rgb/camera_info", 1);
 
